@@ -1,4 +1,4 @@
-name: Build Kernel Marble (Battery Saver - No KSU)
+name: Build Kernel Marble (EvoX Pure Fix)
 
 on:
   workflow_dispatch:
@@ -12,11 +12,11 @@ on:
       custom_version:
         description: 'Nama Versi'
         required: true
-        default: '-Meng.Kernel'
+        default: '-EvoX-Pure-Battery'
         type: string
 
 jobs:
-  build-battery-saver:
+  build-evox-pure-fix:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -77,11 +77,15 @@ jobs:
         OBJDUMP=llvm-objdump \
         STRIP=llvm-strip"
 
-        MY_CFLAGS="-Wno-uninitialized-const-pointer -Wno-sometimes-uninitialized -Os -flto=thin -mcpu=cortex-a55 -fno-unroll-loops"
+        # [FIX UTAMA]
+        # HAPUS '-flto=thin' dari sini. Ini biang kerok error "not ELF".
+        # Sisa flags (-Os, -fno-unroll-loops) aman untuk optimasi size/baterai.
+        MY_CFLAGS="-Wno-uninitialized-const-pointer -Wno-sometimes-uninitialized -Os -mcpu=cortex-a55 -fno-unroll-loops"
         
         make $ARGS mrproper
         make $ARGS KCFLAGS="$MY_CFLAGS" gki_defconfig
         
+        # Merge Config
         ./scripts/kconfig/merge_config.sh -m -O out out/.config \
             arch/arm64/configs/vendor/waipio_GKI.config \
             arch/arm64/configs/vendor/xiaomi_GKI.config \
@@ -89,7 +93,16 @@ jobs:
             arch/arm64/configs/vendor/marble_GKI.config
             
         ./scripts/config --file out/.config --set-str LOCALVERSION "${{ github.event.inputs.custom_version }}"
+
+        # [LTO RESMI]
+        # Aktifkan LTO Thin lewat config kernel, bukan lewat flags manual.
+        # Ini biar mk_elfconfig tidak bingung.
+        ./scripts/config --file out/.config --enable CONFIG_LTO
+        ./scripts/config --file out/.config --enable CONFIG_LTO_CLANG
+        ./scripts/config --file out/.config --enable CONFIG_LTO_CLANG_THIN
         
+        # [ANTI BOOTLOOP]
+        # Biar kernel baru ini mau baca driver bawaan ROM EvoX
         ./scripts/config --file out/.config --enable CONFIG_MODULES
         ./scripts/config --file out/.config --disable CONFIG_MODVERSIONS
         ./scripts/config --file out/.config --disable CONFIG_MODULE_SIG
@@ -114,8 +127,10 @@ jobs:
         OBJDUMP=llvm-objdump \
         STRIP=llvm-strip"
         
-        MY_CFLAGS="-Wno-uninitialized-const-pointer -Wno-sometimes-uninitialized -Os -flto=thin -mcpu=cortex-a55 -fno-unroll-loops"
+        # Flags sama, tanpa -flto=thin
+        MY_CFLAGS="-Wno-uninitialized-const-pointer -Wno-sometimes-uninitialized -Os -mcpu=cortex-a55 -fno-unroll-loops"
         
+        echo "Building Image (EvoX Pure + Safe Battery Opt)..."
         make $ARGS KCFLAGS="$MY_CFLAGS" -j$(nproc --all) Image
         
         gzip -c out/arch/arm64/boot/Image > out/arch/arm64/boot/Image.gz
@@ -123,5 +138,5 @@ jobs:
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: EvoX-BatterySaver-Build
+        name: EvoX-Pure-BatterySaver
         path: kernel_source/out/arch/arm64/boot/Image.gz
