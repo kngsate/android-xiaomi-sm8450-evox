@@ -1,4 +1,4 @@
-name: Build Kernel Marble
+name: Build Kernel Marble (EvoX + SukiSU Fix)
 
 on:
   workflow_dispatch:
@@ -16,7 +16,7 @@ on:
         type: string
 
 jobs:
-  build-evox-lite:
+  build-evox-fix:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -97,18 +97,26 @@ jobs:
             
         ./scripts/config --file out/.config --set-str LOCALVERSION "${{ github.event.inputs.custom_version }}"
         
+        # [CRITICAL FIX] Enable Hooks for SukiSU
+        ./scripts/config --file out/.config --enable CONFIG_KPROBES
+        ./scripts/config --file out/.config --enable CONFIG_KRETPROBES
+        ./scripts/config --file out/.config --enable CONFIG_HAVE_SYSCALL_TRACEPOINTS
+        ./scripts/config --file out/.config --enable CONFIG_KSU_SYSCALL_HOOK
+
+        # Anti-Bootloop Settings (Skip Signatures)
         ./scripts/config --file out/.config --enable CONFIG_MODULES
         ./scripts/config --file out/.config --disable CONFIG_MODVERSIONS
         ./scripts/config --file out/.config --disable CONFIG_MODULE_SIG
         ./scripts/config --file out/.config --enable CONFIG_MODULE_FORCE_LOAD
         
-        # Paksa SukiSU jadi Module (LKM)
+        # Force SukiSU as Module (LKM)
         ./scripts/config --file out/.config --set-str CONFIG_KSU m
         
         make $ARGS KCFLAGS="$MY_CFLAGS" olddefconfig
         
-        echo "Cek Config KSU:"
+        echo "=== VERIFY CONFIG ==="
         grep "CONFIG_KSU" out/.config
+        grep "CONFIG_KPROBES" out/.config
 
     - name: Build Kernel & Internal Modules
       run: |
@@ -148,6 +156,14 @@ jobs:
         find drivers -name "sukisu.ko" -exec cp {} final_artifacts/modules/ \; || true
         find drivers -name "ksu.ko" -exec cp {} final_artifacts/modules/ \; || true
         find drivers -name "kernelsu.ko" -exec cp {} final_artifacts/modules/ \; || true
+        
+        # Cek apakah module berhasil dicopy (penting!)
+        if [ -z "$(ls -A final_artifacts/modules)" ]; then
+           echo "❌ ERROR: Module SukiSU tidak ditemukan! Cek Config Hook."
+           exit 1
+        else
+           echo "✅ Module SukiSU ditemukan."
+        fi
         
         # Zip Module SukiSU
         cd final_artifacts/modules
