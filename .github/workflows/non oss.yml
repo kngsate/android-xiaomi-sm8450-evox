@@ -1,4 +1,4 @@
-name: Build Kernel Marble (Manual SukiSU Fix)
+name: Build Kernel Marble (EvoX + SukiSU Built-in)
 
 on:
   workflow_dispatch:
@@ -12,11 +12,11 @@ on:
       custom_version:
         description: 'Nama Versi'
         required: true
-        default: '-Meng.Kernel-wsksu'
+        default: '-EvoX-SukiSU-Builtin'
         type: string
 
 jobs:
-  build-manual-fix:
+  build-sukisu-builtin:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -60,37 +60,12 @@ jobs:
         # Fix Haptics
         sed -i 's/const char \*name;/const char *name = NULL;/g' drivers/input/misc/qcom-hv-haptics.c || true
 
-    - name: Setup SukiSU (MANUAL INTEGRATION)
+    - name: Setup SukiSU Ultra (BUILTIN MODE)
       run: |
         cd kernel_source
-        
-        echo "--> Cloning SukiSU Repository..."
-        # Clone langsung ke root kernel source
-        git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU-Ultra KernelSU
-        
-        echo "--> Creating Symlink..."
-        # Kita buat symlink manual. Ini jauh lebih akurat daripada script otomatis.
-        # Kita arahkan folder 'kernel' milik SukiSU ke 'drivers/kernelsu'
-        cd drivers
-        ln -sf ../KernelSU/kernel kernelsu
-        cd ..
-        
-        echo "--> Patching Drivers Makefile..."
-        # Tambahkan ke Makefile agar dicompile
-        # Kita pakai append (>>) agar aman
-        if ! grep -q "kernelsu" drivers/Makefile; then
-            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
-        fi
-        
-        echo "--> Patching Drivers Kconfig..."
-        # Tambahkan ke Kconfig agar muncul di menu config
-        if ! grep -q "drivers/kernelsu/Kconfig" drivers/Kconfig; then
-            sed -i '$d' drivers/Kconfig
-            echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
-            echo 'endmenu' >> drivers/Kconfig
-        fi
-        
-        echo "✅ SukiSU Manual Setup Complete!"
+        echo "Running SukiSU Setup for Built-in..."
+        # Menggunakan argumen 'builtin' sesuai permintaan
+        curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 
     - name: Configure Kernel
       run: |
@@ -123,37 +98,26 @@ jobs:
             
         ./scripts/config --file out/.config --set-str LOCALVERSION "${{ github.event.inputs.custom_version }}"
         
-        # [CRITICAL] Enable Dependencies for KPROBES & KSU
-        # Ini yang sering bikin config KSU hilang sendiri!
-        ./scripts/config --file out/.config --enable CONFIG_KALLSYMS
-        ./scripts/config --file out/.config --enable CONFIG_KALLSYMS_ALL
+        # [SETTING KSU BUILTIN]
+        # Kita set ke 'y' (Built-in), bukan 'm' (Module)
+        ./scripts/config --file out/.config --set-str CONFIG_KSU y
+        
+        # Enable Dependencies (Wajib biar gak error compile)
         ./scripts/config --file out/.config --enable CONFIG_KPROBES
-        ./scripts/config --file out/.config --enable CONFIG_KRETPROBES
         ./scripts/config --file out/.config --enable CONFIG_HAVE_SYSCALL_TRACEPOINTS
-        ./scripts/config --file out/.config --enable CONFIG_KSU_SYSCALL_HOOK
-
-        # Anti-Bootloop Settings
+        
+        # Anti-Bootloop Settings (Skip Signatures)
         ./scripts/config --file out/.config --enable CONFIG_MODULES
         ./scripts/config --file out/.config --disable CONFIG_MODVERSIONS
         ./scripts/config --file out/.config --disable CONFIG_MODULE_SIG
         ./scripts/config --file out/.config --enable CONFIG_MODULE_FORCE_LOAD
         
-        # Force SukiSU as Module (LKM)
-        ./scripts/config --file out/.config --set-str CONFIG_KSU m
-        
         make $ARGS KCFLAGS="$MY_CFLAGS" olddefconfig
         
-        echo "=== VERIFIKASI AKHIR CONFIG ==="
-        # Jika grep ini gagal, kita hentikan proses biar gak buang waktu
-        if grep -q "CONFIG_KSU=m" out/.config; then
-            echo "✅ CONFIG_KSU is set to Module (m). Aman."
-        else
-            echo "❌ ERROR FATAL: CONFIG_KSU hilang dari .config! Cek dependencies."
-            # Kita exit kalau config gagal, biar ketauan langsung
-            exit 1
-        fi
+        echo "=== VERIFY CONFIG ==="
+        grep "CONFIG_KSU" out/.config
 
-    - name: Build Kernel & Modules
+    - name: Build Kernel Image
       run: |
         cd kernel_source
         export PATH="$GITHUB_WORKSPACE/greenforce-clang/bin:$PATH"
@@ -172,43 +136,14 @@ jobs:
         
         MY_CFLAGS="-Wno-uninitialized-const-pointer -Wno-sometimes-uninitialized"
         
-        echo "Building Image & SukiSU..."
-        make $ARGS KCFLAGS="$MY_CFLAGS" -j$(nproc --all) Image modules
+        echo "Building Image (Built-in Mode)..."
+        # Kita cukup build Image saja, karena SukiSU sudah tertanam didalamnya
+        make $ARGS KCFLAGS="$MY_CFLAGS" -j$(nproc --all) Image
         
         gzip -c out/arch/arm64/boot/Image > out/arch/arm64/boot/Image.gz
-
-    - name: Collect Artifacts
-      run: |
-        cd kernel_source/out
-        
-        mkdir -p final_artifacts/modules
-        
-        # Ambil Image
-        cp arch/arm64/boot/Image.gz final_artifacts/
-        
-        echo "Looking for SukiSU module..."
-        # Cari di seluruh folder drivers di dalam out
-        find drivers -name "sukisu.ko" -exec cp {} final_artifacts/modules/ \; || true
-        find drivers -name "ksu.ko" -exec cp {} final_artifacts/modules/ \; || true
-        find drivers -name "kernelsu.ko" -exec cp {} final_artifacts/modules/ \; || true
-        
-        # Cek apakah module berhasil dicopy
-        if [ -z "$(ls -A final_artifacts/modules)" ]; then
-           echo "❌ ERROR: Module SukiSU tidak ditemukan!"
-           echo "Daftar file di out/drivers/kernelsu (Debug):"
-           ls -R drivers/kernelsu || true
-           exit 1
-        else
-           echo "✅ Module SukiSU ditemukan."
-           ls -l final_artifacts/modules/
-        fi
-        
-        # Zip Module SukiSU
-        cd final_artifacts/modules
-        zip -r ../SukiSU_Module.zip .
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: EvoX-ManualSukiSU-Build
-        path: kernel_source/out/final_artifacts/
+        name: EvoX-SukiSU-Builtin
+        path: kernel_source/out/arch/arm64/boot/Image.gz
