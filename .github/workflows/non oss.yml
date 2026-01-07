@@ -1,4 +1,4 @@
-name: Build Kernel Marble (EvoX + SukiSU Fix)
+name: Build Kernel Marble (Manual SukiSU Fix)
 
 on:
   workflow_dispatch:
@@ -16,7 +16,7 @@ on:
         type: string
 
 jobs:
-  build-evox-fix:
+  build-manual-fix:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -57,14 +57,40 @@ jobs:
         sed -i 's/probe_kernel_read/copy_from_kernel_nofault/g' kernel/trace/bpf_trace.c || true
         sed -i 's/u64 clidr;/u64 clidr = 0;/g' arch/arm64/kvm/sys_regs.c || true
         grep -rl "clidr_e11" arch/arm64 | xargs sed -i 's/clidr_e11/clidr_el1/g' || true
-        # Fix Haptics (Wajib biar ga error di internal driver)
+        # Fix Haptics
         sed -i 's/const char \*name;/const char *name = NULL;/g' drivers/input/misc/qcom-hv-haptics.c || true
 
-    - name: Setup SukiSU Ultra (Curl)
+    - name: Setup SukiSU (MANUAL INTEGRATION)
       run: |
         cd kernel_source
-        echo "Cloning SukiSU Ultra..."
-        curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
+        
+        echo "--> Cloning SukiSU Repository..."
+        # Clone langsung ke root kernel source
+        git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU-Ultra KernelSU
+        
+        echo "--> Creating Symlink..."
+        # Kita buat symlink manual. Ini jauh lebih akurat daripada script otomatis.
+        # Kita arahkan folder 'kernel' milik SukiSU ke 'drivers/kernelsu'
+        cd drivers
+        ln -sf ../KernelSU/kernel kernelsu
+        cd ..
+        
+        echo "--> Patching Drivers Makefile..."
+        # Tambahkan ke Makefile agar dicompile
+        # Kita pakai append (>>) agar aman
+        if ! grep -q "kernelsu" drivers/Makefile; then
+            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+        fi
+        
+        echo "--> Patching Drivers Kconfig..."
+        # Tambahkan ke Kconfig agar muncul di menu config
+        if ! grep -q "drivers/kernelsu/Kconfig" drivers/Kconfig; then
+            sed -i '$d' drivers/Kconfig
+            echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+            echo 'endmenu' >> drivers/Kconfig
+        fi
+        
+        echo "✅ SukiSU Manual Setup Complete!"
 
     - name: Configure Kernel
       run: |
@@ -97,13 +123,16 @@ jobs:
             
         ./scripts/config --file out/.config --set-str LOCALVERSION "${{ github.event.inputs.custom_version }}"
         
-        # [CRITICAL FIX] Enable Hooks for SukiSU
+        # [CRITICAL] Enable Dependencies for KPROBES & KSU
+        # Ini yang sering bikin config KSU hilang sendiri!
+        ./scripts/config --file out/.config --enable CONFIG_KALLSYMS
+        ./scripts/config --file out/.config --enable CONFIG_KALLSYMS_ALL
         ./scripts/config --file out/.config --enable CONFIG_KPROBES
         ./scripts/config --file out/.config --enable CONFIG_KRETPROBES
         ./scripts/config --file out/.config --enable CONFIG_HAVE_SYSCALL_TRACEPOINTS
         ./scripts/config --file out/.config --enable CONFIG_KSU_SYSCALL_HOOK
 
-        # Anti-Bootloop Settings (Skip Signatures)
+        # Anti-Bootloop Settings
         ./scripts/config --file out/.config --enable CONFIG_MODULES
         ./scripts/config --file out/.config --disable CONFIG_MODVERSIONS
         ./scripts/config --file out/.config --disable CONFIG_MODULE_SIG
@@ -114,11 +143,17 @@ jobs:
         
         make $ARGS KCFLAGS="$MY_CFLAGS" olddefconfig
         
-        echo "=== VERIFY CONFIG ==="
-        grep "CONFIG_KSU" out/.config
-        grep "CONFIG_KPROBES" out/.config
+        echo "=== VERIFIKASI AKHIR CONFIG ==="
+        # Jika grep ini gagal, kita hentikan proses biar gak buang waktu
+        if grep -q "CONFIG_KSU=m" out/.config; then
+            echo "✅ CONFIG_KSU is set to Module (m). Aman."
+        else
+            echo "❌ ERROR FATAL: CONFIG_KSU hilang dari .config! Cek dependencies."
+            # Kita exit kalau config gagal, biar ketauan langsung
+            exit 1
+        fi
 
-    - name: Build Kernel & Internal Modules
+    - name: Build Kernel & Modules
       run: |
         cd kernel_source
         export PATH="$GITHUB_WORKSPACE/greenforce-clang/bin:$PATH"
@@ -151,18 +186,21 @@ jobs:
         # Ambil Image
         cp arch/arm64/boot/Image.gz final_artifacts/
         
-        # Ambil SukiSU Module
         echo "Looking for SukiSU module..."
+        # Cari di seluruh folder drivers di dalam out
         find drivers -name "sukisu.ko" -exec cp {} final_artifacts/modules/ \; || true
         find drivers -name "ksu.ko" -exec cp {} final_artifacts/modules/ \; || true
         find drivers -name "kernelsu.ko" -exec cp {} final_artifacts/modules/ \; || true
         
-        # Cek apakah module berhasil dicopy (penting!)
+        # Cek apakah module berhasil dicopy
         if [ -z "$(ls -A final_artifacts/modules)" ]; then
-           echo "❌ ERROR: Module SukiSU tidak ditemukan! Cek Config Hook."
+           echo "❌ ERROR: Module SukiSU tidak ditemukan!"
+           echo "Daftar file di out/drivers/kernelsu (Debug):"
+           ls -R drivers/kernelsu || true
            exit 1
         else
            echo "✅ Module SukiSU ditemukan."
+           ls -l final_artifacts/modules/
         fi
         
         # Zip Module SukiSU
@@ -172,5 +210,5 @@ jobs:
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: EvoX-KernelOnly-Build
+        name: EvoX-ManualSukiSU-Build
         path: kernel_source/out/final_artifacts/
