@@ -1,0 +1,160 @@
+name: Build Kernel Marble
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_branch:
+        description: 'Branch Kernel EvoX'
+        required: true
+        default: 'bka'
+        type: string
+      
+      custom_version:
+        description: 'Nama Versi'
+        required: true
+        default: '-Meng.Kernel-wsksu'
+        type: string
+
+jobs:
+  build-evox-lite:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+    - name: Setup Swap Space (12GB)
+      run: |
+        echo "Creating Swap..."
+        sudo fallocate -l 12G /swapfile
+        sudo chmod 600 /swapfile
+        sudo mkswap /swapfile
+        sudo swapon /swapfile
+        free -h
+
+    - name: Checkout Kernel (EvoX Official)
+      uses: actions/checkout@v4
+      with:
+        repository: Evolution-X-Devices/kernel_xiaomi_sm8450
+        ref: ${{ github.event.inputs.kernel_branch }}
+        fetch-depth: 1
+        path: kernel_source
+
+    - name: Setup Build Environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential bc bison flex libssl-dev libncurses-dev libncurses5-dev \
+        git curl libelf-dev libfl-dev python3 python-is-python3 patch \
+        gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi device-tree-compiler wget binutils-aarch64-linux-gnu zip
+
+    - name: Download Greenforce Clang
+      run: |
+        bash <(wget -qO- https://raw.githubusercontent.com/greenforce-project/greenforce_clang/refs/heads/main/get_clang.sh)
+
+    - name: Preventive Fixes 
+      run: |
+        cd kernel_source
+        sed -i 's/probe_kernel_read/copy_from_kernel_nofault/g' include/linux/bpf.h || true
+        sed -i 's/probe_kernel_read/copy_from_kernel_nofault/g' kernel/trace/bpf_trace.c || true
+        sed -i 's/u64 clidr;/u64 clidr = 0;/g' arch/arm64/kvm/sys_regs.c || true
+        grep -rl "clidr_e11" arch/arm64 | xargs sed -i 's/clidr_e11/clidr_el1/g' || true
+        # Fix Haptics (Wajib biar ga error di internal driver)
+        sed -i 's/const char \*name;/const char *name = NULL;/g' drivers/input/misc/qcom-hv-haptics.c || true
+
+    - name: Setup SukiSU Ultra (Curl)
+      run: |
+        cd kernel_source
+        echo "Cloning SukiSU Ultra..."
+        curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
+
+    - name: Configure Kernel
+      run: |
+        cd kernel_source
+        export PATH="$GITHUB_WORKSPACE/greenforce-clang/bin:$PATH"
+        
+        ARGS="O=out ARCH=arm64 \
+        CC=clang \
+        LLVM=1 \
+        LLVM_IAS=1 \
+        CROSS_COMPILE=aarch64-linux-gnu- \
+        CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+        AR=llvm-ar \
+        NM=llvm-nm \
+        OBJCOPY=llvm-objcopy \
+        OBJDUMP=llvm-objdump \
+        STRIP=llvm-strip"
+
+        MY_CFLAGS="-Wno-uninitialized-const-pointer -Wno-sometimes-uninitialized"
+        
+        make $ARGS mrproper
+        make $ARGS KCFLAGS="$MY_CFLAGS" gki_defconfig
+        
+        # Merge Config
+        ./scripts/kconfig/merge_config.sh -m -O out out/.config \
+            arch/arm64/configs/vendor/waipio_GKI.config \
+            arch/arm64/configs/vendor/xiaomi_GKI.config \
+            arch/arm64/configs/vendor/debugfs.config \
+            arch/arm64/configs/vendor/marble_GKI.config
+            
+        ./scripts/config --file out/.config --set-str LOCALVERSION "${{ github.event.inputs.custom_version }}"
+        
+        ./scripts/config --file out/.config --enable CONFIG_MODULES
+        ./scripts/config --file out/.config --disable CONFIG_MODVERSIONS
+        ./scripts/config --file out/.config --disable CONFIG_MODULE_SIG
+        ./scripts/config --file out/.config --enable CONFIG_MODULE_FORCE_LOAD
+        
+        # Paksa SukiSU jadi Module (LKM)
+        ./scripts/config --file out/.config --set-str CONFIG_KSU m
+        
+        make $ARGS KCFLAGS="$MY_CFLAGS" olddefconfig
+        
+        echo "Cek Config KSU:"
+        grep "CONFIG_KSU" out/.config
+
+    - name: Build Kernel & Internal Modules
+      run: |
+        cd kernel_source
+        export PATH="$GITHUB_WORKSPACE/greenforce-clang/bin:$PATH"
+        
+        ARGS="O=out ARCH=arm64 \
+        CC=clang \
+        LLVM=1 \
+        LLVM_IAS=1 \
+        CROSS_COMPILE=aarch64-linux-gnu- \
+        CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+        AR=llvm-ar \
+        NM=llvm-nm \
+        OBJCOPY=llvm-objcopy \
+        OBJDUMP=llvm-objdump \
+        STRIP=llvm-strip"
+        
+        MY_CFLAGS="-Wno-uninitialized-const-pointer -Wno-sometimes-uninitialized"
+        
+        echo "Building Image & SukiSU..."
+        make $ARGS KCFLAGS="$MY_CFLAGS" -j$(nproc --all) Image modules
+        
+        gzip -c out/arch/arm64/boot/Image > out/arch/arm64/boot/Image.gz
+
+    - name: Collect Artifacts
+      run: |
+        cd kernel_source/out
+        
+        mkdir -p final_artifacts/modules
+        
+        # Ambil Image
+        cp arch/arm64/boot/Image.gz final_artifacts/
+        
+        # Ambil SukiSU Module
+        echo "Looking for SukiSU module..."
+        find drivers -name "sukisu.ko" -exec cp {} final_artifacts/modules/ \; || true
+        find drivers -name "ksu.ko" -exec cp {} final_artifacts/modules/ \; || true
+        find drivers -name "kernelsu.ko" -exec cp {} final_artifacts/modules/ \; || true
+        
+        # Zip Module SukiSU
+        cd final_artifacts/modules
+        zip -r ../SukiSU_Module.zip .
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: EvoX-KernelOnly-Build
+        path: kernel_source/out/final_artifacts/
